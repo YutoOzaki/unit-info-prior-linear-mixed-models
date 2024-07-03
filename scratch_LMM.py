@@ -29,9 +29,9 @@ def run_analysis(y, X, Z):
     N, d = X.shape
     C = Z.shape[1]
     nu_sgm = 2
-    A_sgm = 100
+    A_sgm = 1000
     nu_s = 2
-    A_s = 100
+    A_s = 1000
     m = np.zeros(d)
     c = np.where(Z == 1)[1]
 
@@ -53,10 +53,10 @@ def run_analysis(y, X, Z):
         return idata
 
 if __name__ == "__main__":
-    N = 256
+    N = 512
     d = 3
-    C = 32
-    y, X, Z, be_0, sgm_0, s_0, u = gen_simdata(N, d, C, 48)
+    C = 64
+    y, X, Z, be_0, sgm_0, s_0, u = gen_simdata(N, d, C, 54)
 
     idata = run_analysis(y, X, Z)
 
