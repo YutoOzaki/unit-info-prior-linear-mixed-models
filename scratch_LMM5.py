@@ -12,7 +12,7 @@ import pandas as pd
 from datetime import datetime
 
 
-def gen_simdata(N, d, C, seed=None):
+def gen_simdata(null, N, d, C, seed=None):
     rng = np.random.default_rng(seed=seed)
 
     Z = rng.multinomial(1, [1 / C] * C, size=N)
@@ -24,7 +24,12 @@ def gen_simdata(N, d, C, seed=None):
     u = sp.stats.multivariate_normal(mean=np.zeros(C), cov=np.eye(C) * s_0 ** 2, seed=rng).rvs()
     sgm_0 = rng.lognormal(mean=0, sigma=1.2)
     eps = rng.normal(loc=0, scale=sgm_0, size=N)
-    be_0 = np.append(rng.uniform(low=-10, high=10, size=2), rng.uniform(low=0.9, high=1.3))
+
+    if null:
+        be_0 = np.array((rng.uniform(low=-10, high=10), 0, rng.uniform(low=0.9, high=1.3)))
+    else:
+        be_0 = np.append(rng.uniform(low=-10, high=10, size=2), rng.uniform(low=0.9, high=1.3))
+
     X = np.stack([np.ones(N), np.zeros(N), rng.lognormal(mean=0, sigma=1.5, size=N) + 50], axis=1)
     _, c = np.where(Z == 1)
     for i in range(C):
@@ -42,14 +47,14 @@ def testfisherinfoconstruction(X, Z, sgm, s):
     N, d = X.shape
     _, C = Z.shape
 
-    R = sgm ** 2 * np.eye(N)
-    D = s ** 2 * np.eye(C)
+    R = sgm**2 * np.eye(N)
+    D = s**2 * np.eye(C)
     V = Z.dot(D).dot(Z.T) + R
     iV = np.linalg.inv(V)
     A = X.T.dot(iV).dot(X)
 
-    a = sgm ** 2
-    b = s ** 2
+    a = sgm**2
+    b = s**2
     Λ = np.zeros([d, d])
     offset = 0
     for i in range(C):
@@ -127,6 +132,24 @@ def support_point_nonlocal(rv: TensorVariable, size: TensorVariable, mu: TensorV
     return mu + np.sqrt(2) / pt.sqrt(pt.diagonal(Lambda))
 
 
+def logp_mvnormal(value: TensorVariable, mu: TensorVariable, Lambda: TensorVariable) -> TensorVariable:
+    z = value - mu
+    logdetLambda = pm.math.logdet(Lambda)
+    return 0.5*logdetLambda - 0.5*pt.linalg.matrix_dot(z.T, Lambda, z)
+
+
+def random_mvnormal(mu: np.ndarray | float, Lambda: np.ndarray | float,
+                    rng: Optional[np.random.Generator] = None,
+                    size: Optional[Tuple[int]] = None) -> np.ndarray | float:
+    iLambda = np.linalg.inv(Lambda)
+    return sp.stats.multivariate_normal(mean=mu, cov=iLambda, seed=rng).rvs(size)
+
+
+def support_point_mvnormal(rv: TensorVariable, size: TensorVariable, mu: TensorVariable,
+                           Lambda: TensorVariable) -> TensorVariable:
+    return mu
+
+
 def logPowNormal(y, mu, sigma, beta):
     return beta*(-0.5*pm.math.log(2*np.pi) - pm.math.log(sigma) - 0.5*(y - mu)**2/sigma**2)
 
@@ -135,7 +158,7 @@ nu_sgm = 2
 A_sgm = 1000
 nu_s = 2
 A_s = 1000
-def run_analysis(y, X, Z, thermobeta):
+def run_analysis(model_idx, y, X, Z, thermobeta):
     N, d = X.shape
     _, C = Z.shape
     _, c = np.where(Z == 1)
@@ -163,7 +186,7 @@ def run_analysis(y, X, Z, thermobeta):
 
         def oneStep(n, offset, Λ_tm, X, a, b):
             X_i = X[offset:(offset + n), :]
-            iV_i = 1 / a * pt.eye(n) - b / (a * (a + b * n)) * pt.ones(shape=[n, n])
+            iV_i = 1/a * pt.eye(n) - b/(a*(a + b*n)) * pt.ones(shape=[n, n])
             Λ = Λ_tm + pt.linalg.matrix_dot(X_i.T, iV_i, X_i)
             return Λ
 
@@ -175,13 +198,19 @@ def run_analysis(y, X, Z, thermobeta):
                              non_sequences=[pt.as_tensor_variable(X), a, b],
                              strict=True)
 
-        Λ = Λ[-1] / g
+        Λ = Λ[-1]/g
         # '''
 
         # '''
-        β = pm.CustomDist('be', m_be, Λ, logp=logp_nonlocal,
-                          random=random_nonlocal, support_point=support_point_nonlocal,
-                          signature='(n),(n,n)->(n)')
+        if model_idx == 0:
+            #β = pm.MvNormal('be', mu=m_be, tau=Λ)
+            β = pm.CustomDist('be', m_be, Λ, logp=logp_mvnormal,
+                              random=random_mvnormal, support_point=support_point_mvnormal,
+                              signature='(n),(n,n)->(n)')
+        elif model_idx == 1:
+            β = pm.CustomDist('be', m_be, Λ, logp=logp_nonlocal,
+                              random=random_nonlocal, support_point=support_point_nonlocal,
+                              signature='(n),(n,n)->(n)')
         # '''
 
         μ = pm.math.matmul(X, β) + u[c]
@@ -195,12 +224,62 @@ def run_analysis(y, X, Z, thermobeta):
     # '''
 
 
+def posteriorsampling(model_idx, y, X, Z, thermobeta):
+    idata = run_analysis(model_idx, y, X, Z, thermobeta)
+
+    N, d = X.shape
+    _, C = Z.shape
+    _, c = np.where(Z == 1)
+
+    be_pos = idata.posterior['be'].to_numpy()
+    numchain, numsample, _ = be_pos.shape
+    M = numchain*numsample
+    be_pos = be_pos.reshape([M, d])
+    sgm_pos = idata.posterior['sgm'].to_numpy().reshape([M])
+    u_pos = idata.posterior['u'].to_numpy().reshape([M, C])
+
+    mu_pos = np.zeros([M, N])
+    for m in range(M):
+        mu_pos[m, :] = X.dot(be_pos[m, :]) + u_pos[m, c]
+
+    return mu_pos, sgm_pos, idata
+
+
+def priorsampling(X, Z):
+    N, d = X.shape
+    _, C = Z.shape
+    m_be = np.zeros(d)
+    ZZ = Z.dot(Z.T)
+    I = np.eye(N)
+    _, c = np.where(Z == 1)
+
+    M = 4000
+    sgm_pos = A_sgm * np.abs(np.random.standard_t(df=nu_sgm, size=M))
+    mu_pos = np.zeros([M, N])
+    i = 0
+    while i < M:
+        try:
+            r = np.random.beta(a=0.01, b=0.01 * N)
+            g = 1/r - 1
+            s = A_s * np.abs(np.random.standard_t(df=nu_s))
+            Lmd = g * np.linalg.inv(X.T.dot(np.linalg.inv(s * ZZ + sgm_pos[i] * I)).dot(X))
+            be_pos = sp.stats.multivariate_normal(mean=m_be, cov=Lmd).rvs()
+            u_pos = np.random.normal(loc=0, scale=s, size=C)
+            mu_pos[i, :] = X.dot(be_pos) + u_pos[c]
+            i += 1
+        except:
+            sgm_pos[i] = A_sgm * np.abs(np.random.standard_t(df=nu_sgm))
+
+    return mu_pos, sgm_pos
+
+
 if __name__ == "__main__":
     # test data
     N = 256
     d = 3
     C = 32
-    y, X, Z, be_0, sgm_0, s_0, u = gen_simdata(N, d, C)
+    null = False
+    y, X, Z, be_0, sgm_0, s_0, u = gen_simdata(null, N, d, C)
 
     # stepping-stone algorithm variables
     K = 10
@@ -211,44 +290,33 @@ if __name__ == "__main__":
     sgm_pt = pt.scalar()
     be_pt = pt.scalar()
     logpowlik = logPowNormal(y_pt, mu_pt, sgm_pt, be_pt)
-    _, c = np.where(Z == 1)
 
     # inference
-    lnr = np.zeros(K)
-    for k in range(K):
-        if thermobeta[k] > 0:
+    lnZ = [0, 0]
+    for model_idx in [0, 1]:
+        lnr = np.zeros(K)
+        if model_idx == 0:
+            X_m = np.delete(X, obj=1, axis=1)
+        else:
+            X_m = X.copy()
+
+        for k in range(K):
             print('{}: analysis start (k = {}/{})'.format(datetime.now(), k, K))
-            idata = run_analysis(y, X, Z, thermobeta[k])
+            if thermobeta[k] > 0:
+                mu_pos, sgm_pos, idata = posteriorsampling(model_idx, y, X_m, Z, thermobeta[k])
+            else:
+                mu_pos, sgm_pos = priorsampling(X_m, Z)
             print('{}: analysis end (k = {}/{})'.format(datetime.now(), k, K))
 
-            be_pos = idata.posterior['be'].to_numpy()
-            numchain, numsample, d = be_pos.shape
-            be_pos = be_pos.reshape([numchain*numsample, d])
-            sgm_pos = idata.posterior['sgm'].to_numpy().reshape([numchain*numsample])
-            u_pos = idata.posterior['u'].to_numpy().reshape([numchain*numsample, C])
-        else:
-            numchain = 4
-            numsample = 1000
-            M = numchain*numsample
-            m_be = np.zeros(d)
-            sgm_pos = A_sgm*np.abs(np.random.standard_t(df=nu_sgm, size=M))
-            s = A_s*np.abs(np.random.standard_t(df=nu_s, size=M))
-            u_pos = np.vstack([np.random.normal(loc=0, scale=s[i], size=C) for i in range(M)])
-            g = 1/np.random.beta(a=0.01, b=0.01*N, size=M) - 1
-            ZZ = Z.dot(Z.T)
-            I = np.eye(N)
-            Lmd = [g[i]*np.linalg.inv(X.T.dot(np.linalg.inv(s[i]*ZZ + sgm_pos[i]*I)).dot(X)) for i in range(M)]
-            be_pos = np.vstack([sp.stats.multivariate_normal(mean=m_be, cov=Lmd[i]).rvs() for i in range(M)])
+            l_theta = np.zeros(mu_pos.shape[0])
+            dbe = thermobeta[k + 1] - thermobeta[k]
+            for m in range(mu_pos.shape[0]):
+                l_theta[m] += np.sum(logpowlik.eval({y_pt: y, mu_pt: mu_pos[m, :], sgm_pt: sgm_pos[m], be_pt: dbe}))
+            lnr[k] = np.max(l_theta) + np.log(np.sum(np.exp(l_theta - np.max(l_theta)))) - np.log(mu_pos.shape[0])
+            print('lnr[k] = {}'.format(lnr[k]))
 
-        l_theta = np.zeros(numchain*numsample)
-        dbe = thermobeta[k + 1] - thermobeta[k]
-        for m in range(numchain*numsample):
-            mu_pos = X.dot(be_pos[m, :]) + u_pos[m, c]
-            l_theta[m] += np.sum(logpowlik.eval({y_pt: y, mu_pt: mu_pos, sgm_pt: sgm_pos[m], be_pt: dbe}))
-        lnr[k] = np.max(l_theta) + np.log(np.sum(np.exp(l_theta - np.max(l_theta)))) - np.log(numchain*numsample)
-
-    lnZ = np.sum(lnr)
-    print("lnZ (Stepping-stone sampling): {}".format(lnZ))
+        lnZ[model_idx] = np.sum(lnr)
+        print("model {} - lnZ (Stepping-stone sampling): {}".format(model_idx, lnZ[model_idx]))
 
     az.plot_energy(idata)
     plt.savefig("/Users/yutoozaki/Desktop/energy.png")
