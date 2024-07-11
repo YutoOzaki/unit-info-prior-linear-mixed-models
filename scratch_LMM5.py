@@ -171,8 +171,8 @@ def run_analysis(model_idx, y, X, Z, thermobeta):
         r = pm.Beta('r', alpha=0.01, beta=0.01 * N)
         g = 1/r - 1
 
-        a = σ ** 2
-        b = s ** 2
+        a = σ**2
+        b = s**2
 
         # ''' scan version
         offset = 0
@@ -245,7 +245,7 @@ def posteriorsampling(model_idx, y, X, Z, thermobeta):
     return mu_pos, sgm_pos, idata
 
 
-def priorsampling(X, Z):
+def priorsampling(model_idx, X, Z):
     N, d = X.shape
     _, C = Z.shape
     m_be = np.zeros(d)
@@ -253,17 +253,22 @@ def priorsampling(X, Z):
     I = np.eye(N)
     _, c = np.where(Z == 1)
 
+    if model_idx == 0:
+        def sampler(Lmd): sp.stats.multivariate_normal(mean=m_be, cov=np.linalg.inv(Lmd)).rvs()
+    elif model_idx == 1:
+        def sampler(Lmd): random_nonlocal(m_be, Lmd)
+
     M = 4000
     sgm_pos = A_sgm * np.abs(np.random.standard_t(df=nu_sgm, size=M))
     mu_pos = np.zeros([M, N])
     i = 0
     while i < M:
         try:
-            r = np.random.beta(a=0.01, b=0.01 * N)
+            r = np.random.beta(a=0.01, b=0.01*N)
             g = 1/r - 1
             s = A_s * np.abs(np.random.standard_t(df=nu_s))
-            Lmd = g * np.linalg.inv(X.T.dot(np.linalg.inv(s * ZZ + sgm_pos[i] * I)).dot(X))
-            be_pos = sp.stats.multivariate_normal(mean=m_be, cov=Lmd).rvs()
+            Lmd = X.T.dot(np.linalg.inv(s**2*ZZ + sgm_pos[i]**2*I)).dot(X)/g
+            be_pos = sampler(Lmd) #sp.stats.multivariate_normal(mean=m_be, cov=Lmd).rvs()
             u_pos = np.random.normal(loc=0, scale=s, size=C)
             mu_pos[i, :] = X.dot(be_pos) + u_pos[c]
             i += 1
@@ -293,7 +298,7 @@ if __name__ == "__main__":
 
     # inference
     lnZ = [0, 0]
-    for model_idx in [0, 1]:
+    for model_idx in [1, 0]:
         lnr = np.zeros(K)
         if model_idx == 0:
             X_m = np.delete(X, obj=1, axis=1)
@@ -302,10 +307,13 @@ if __name__ == "__main__":
 
         for k in range(K):
             print('{}: analysis start (k = {}/{})'.format(datetime.now(), k, K))
+            mu_pos, sgm_pos, idata = posteriorsampling(model_idx, y, X_m, Z, thermobeta[k])
+            '''
             if thermobeta[k] > 0:
                 mu_pos, sgm_pos, idata = posteriorsampling(model_idx, y, X_m, Z, thermobeta[k])
             else:
-                mu_pos, sgm_pos = priorsampling(X_m, Z)
+                mu_pos, sgm_pos = priorsampling(model_idx, X_m, Z)
+            '''
             print('{}: analysis end (k = {}/{})'.format(datetime.now(), k, K))
 
             l_theta = np.zeros(mu_pos.shape[0])
